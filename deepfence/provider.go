@@ -59,7 +59,8 @@ type ccProvider struct {
 	providerData *providerData // Used in acceptance tests.
 }
 
-func New(ctx context.Context) (*schema.Provider, error) {
+func New() *schema.Provider {
+	ctx := context.Background()
 	provider := &schema.Provider{
 		// This schema must match exactly the Terraform Protocol v6 (Terraform Plugin Framework) provider's schema.
 		// Notably the attributes can have no Default values.
@@ -346,7 +347,7 @@ func New(ctx context.Context) (*schema.Provider, error) {
 	}
 
 	if err := errs.ErrorOrNil(); err != nil {
-		return nil, err
+		return nil
 	}
 
 	var meta *conns.AWSClient
@@ -358,7 +359,7 @@ func New(ctx context.Context) (*schema.Provider, error) {
 	meta.ServicePackages = servicePackages
 	provider.SetMeta(meta)
 
-	return provider, nil
+	return provider
 }
 
 func configure(ctx context.Context, provider *schema.Provider, d *schema.ResourceData) (*conns.AWSClient, diag.Diagnostics) {

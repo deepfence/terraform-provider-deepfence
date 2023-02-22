@@ -6,5 +6,5 @@ import (
 )
 
 func main() {
-	plugin.Serve(&plugin.ServeOpts{ProviderFunc: deepfence.Provider})
+	plugin.Serve(&plugin.ServeOpts{ProviderFunc: deepfence.New})
 }
