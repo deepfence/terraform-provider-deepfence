@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/hashicorp/terraform-provider-aws/internal/generate/common"
-	"github.com/hashicorp/terraform-provider-aws/names"
+	"github.com/deepfence/terraform-provider-deepfence/deepfence/internal/generate/common"
+	"github.com/deepfence/terraform-provider-deepfence/deepfence/names"
 )
 
 type ServiceDatum struct {
