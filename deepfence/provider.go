@@ -109,13 +109,6 @@ func New() *schema.Provider {
 					"Valid values are `IPv4` and `IPv6`. Can also be configured using the `AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE` environment variable.",
 			},
 			"endpoints": endpointsSchema(),
-			"forbidden_account_ids": {
-				Type:          schema.TypeSet,
-				Elem:          &schema.Schema{Type: schema.TypeString},
-				Optional:      true,
-				ConflictsWith: []string{"allowed_account_ids"},
-				Set:           schema.HashString,
-			},
 			"http_proxy": {
 				Type:     schema.TypeString,
 				Optional: true,
@@ -394,10 +387,6 @@ func configure(ctx context.Context, provider *schema.Provider, d *schema.Resourc
 		UseFIPSEndpoint:                d.Get("use_fips_endpoint").(bool),
 	}
 
-	if v, ok := d.GetOk("allowed_account_ids"); ok && v.(*schema.Set).Len() > 0 {
-		config.AllowedAccountIds = flex.ExpandStringValueSet(v.(*schema.Set))
-	}
-
 	if v, ok := d.GetOk("assume_role"); ok && len(v.([]interface{})) > 0 && v.([]interface{})[0] != nil {
 		config.AssumeRole = expandAssumeRole(v.([]interface{})[0].(map[string]interface{}))
 		log.Printf("[INFO] assume_role configuration set: (ARN: %q, SessionID: %q, ExternalID: %q, SourceIdentity: %q)", config.AssumeRole.RoleARN, config.AssumeRole.SessionName, config.AssumeRole.ExternalID, config.AssumeRole.SourceIdentity)
@@ -420,10 +409,6 @@ func configure(ctx context.Context, provider *schema.Provider, d *schema.Resourc
 		}
 
 		config.Endpoints = endpoints
-	}
-
-	if v, ok := d.GetOk("forbidden_account_ids"); ok && v.(*schema.Set).Len() > 0 {
-		config.ForbiddenAccountIds = flex.ExpandStringValueSet(v.(*schema.Set))
 	}
 
 	if v, ok := d.GetOk("ignore_tags"); ok && len(v.([]interface{})) > 0 && v.([]interface{})[0] != nil {

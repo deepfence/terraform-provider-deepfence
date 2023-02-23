@@ -5,7 +5,6 @@ import (
 	"fmt"
 	awsbase "github.com/hashicorp/aws-sdk-go-base/v2"
 	"log"
-	"net/url"
 	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -44,17 +43,6 @@ func ResourceMultiAccountReadOnly() *schema.Resource {
 				Default:  "/",
 				ForceNew: true,
 			},
-			"policy": {
-				Type:                  schema.TypeString,
-				Required:              true,
-				ValidateFunc:          verify.ValidIAMPolicyJSON,
-				DiffSuppressFunc:      verify.SuppressEquivalentPolicyDiffs,
-				DiffSuppressOnRefresh: true,
-				StateFunc: func(v interface{}) string {
-					json, _ := structure.NormalizeJsonString(v)
-					return json
-				},
-			},
 			"name": {
 				Type:          schema.TypeString,
 				Optional:      true,
@@ -80,6 +68,22 @@ func ResourceMultiAccountReadOnly() *schema.Resource {
 			},
 			"tags":     tftags.TagsSchema(),
 			"tags_all": tftags.TagsSchemaComputed(),
+			"account_ids": {
+				Type:        schema.TypeList,
+				Optional:    true,
+				Description: "List of account ids to monitor.",
+				Elem:        &schema.Schema{Type: schema.TypeString},
+			},
+			"member_account_id": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "Member account id in which deepfence cloud scanner is deployed.",
+			},
+			"product_name": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "Product name to be prefixed for resources.",
+			},
 		},
 
 		CustomizeDiff: verify.SetTagsDiff,
@@ -88,20 +92,21 @@ func ResourceMultiAccountReadOnly() *schema.Resource {
 
 func resourceMultiAccountReadOnlyCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	var diags diag.Diagnostics
-	var accountIds []string
+	var accountIds []interface{}
 	var productName string
 	var cloudScannerMemberAccountId string
 	if v, ok := d.GetOk("account_ids"); ok {
-		accountIds = v.([]string)
+		accountIds = v.([]interface{})
 	}
 	roleArns := make([]string, len(accountIds))
 	if v, ok := d.GetOk("product_name"); ok {
 		productName = v.(string)
 	}
-	if v, ok := d.GetOk("product_name"); ok {
+	if v, ok := d.GetOk("member_account_id"); ok {
 		cloudScannerMemberAccountId = v.(string)
 	}
-	for _, accountId := range accountIds {
+	for _, accountIdInterface := range accountIds {
+		accountId := accountIdInterface.(string)
 		accountAssumeRoleArn := fmt.Sprintf("arn:aws:iam::%s:role/OrganizationAccountAccessRole", accountId)
 		config := conns.Config{
 			AccessKey:                      d.Get("access_key").(string),
@@ -251,123 +256,176 @@ func resourceMultiAccountReadOnlyCreate(ctx context.Context, d *schema.ResourceD
 
 func resourceMultiAccountReadOnlyRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	var diags diag.Diagnostics
-	conn := meta.(*conns.AWSClient).IAMConn()
-	defaultTagsConfig := meta.(*conns.AWSClient).DefaultTagsConfig
-	ignoreTagsConfig := meta.(*conns.AWSClient).IgnoreTagsConfig
-
-	input := &iam.GetPolicyInput{
-		PolicyArn: aws.String(d.Id()),
+	var accountIds []interface{}
+	if v, ok := d.GetOk("account_ids"); ok {
+		accountIds = v.([]interface{})
 	}
+	policyArns := strings.Split(d.Id(), ",")
 
-	// Handle IAM eventual consistency
-	var getPolicyResponse *iam.GetPolicyOutput
-	err := resource.RetryContext(ctx, propagationTimeout, func() *resource.RetryError {
-		var err error
-		getPolicyResponse, err = conn.GetPolicyWithContext(ctx, input)
+	for i, accountIdInterface := range accountIds {
+		accountId := accountIdInterface.(string)
+		accountAssumeRoleArn := fmt.Sprintf("arn:aws:iam::%s:role/OrganizationAccountAccessRole", accountId)
+		config := conns.Config{
+			AccessKey:                      d.Get("access_key").(string),
+			CustomCABundle:                 d.Get("custom_ca_bundle").(string),
+			EC2MetadataServiceEndpoint:     d.Get("ec2_metadata_service_endpoint").(string),
+			EC2MetadataServiceEndpointMode: d.Get("ec2_metadata_service_endpoint_mode").(string),
+			Endpoints:                      make(map[string]string),
+			HTTPProxy:                      d.Get("http_proxy").(string),
+			Insecure:                       d.Get("insecure").(bool),
+			MaxRetries:                     25, // Set default here, not in schema (muxing with v6 provider).
+			Profile:                        d.Get("profile").(string),
+			Region:                         d.Get("region").(string),
+			S3UsePathStyle:                 d.Get("s3_use_path_style").(bool) || d.Get("s3_force_path_style").(bool),
+			SecretKey:                      d.Get("secret_key").(string),
+			SkipCredsValidation:            d.Get("skip_credentials_validation").(bool),
+			SkipGetEC2Platforms:            d.Get("skip_get_ec2_platforms").(bool),
+			SkipRegionValidation:           d.Get("skip_region_validation").(bool),
+			SkipRequestingAccountId:        d.Get("skip_requesting_account_id").(bool),
+			STSRegion:                      d.Get("sts_region").(string),
+			TerraformVersion:               "",
+			Token:                          d.Get("token").(string),
+			UseDualStackEndpoint:           d.Get("use_dualstack_endpoint").(bool),
+			UseFIPSEndpoint:                d.Get("use_fips_endpoint").(bool),
+		}
+		config.AssumeRole = &awsbase.AssumeRole{RoleARN: accountAssumeRoleArn}
 
-		if d.IsNewResource() && tfawserr.ErrCodeEquals(err, iam.ErrCodeNoSuchEntityException) {
-			return resource.RetryableError(err)
+		var metaClient *conns.AWSClient
+		if v, ok := meta.(*conns.AWSClient); ok {
+			metaClient = v
+		} else {
+			metaClient = new(conns.AWSClient)
+		}
+		metaClient, diagns := config.ConfigureProvider(ctx, metaClient)
+		if diagns.HasError() {
+			sdkdiag.AppendErrorf(diags, "Unable to configure provider in account %s: %s", accountId, diagns)
 		}
 
-		if err != nil {
-			return resource.NonRetryableError(err)
+		conn := meta.(*conns.AWSClient).IAMConn()
+
+		if i < len(policyArns) {
+			input := &iam.GetPolicyInput{
+				PolicyArn: &policyArns[i],
+			}
+
+			// Handle IAM eventual consistency
+			var getPolicyResponse *iam.GetPolicyOutput
+			err := resource.RetryContext(ctx, propagationTimeout, func() *resource.RetryError {
+				var err error
+				getPolicyResponse, err = conn.GetPolicyWithContext(ctx, input)
+
+				if d.IsNewResource() && tfawserr.ErrCodeEquals(err, iam.ErrCodeNoSuchEntityException) {
+					return resource.RetryableError(err)
+				}
+
+				if err != nil {
+					return resource.NonRetryableError(err)
+				}
+
+				return nil
+			})
+
+			if tfresource.TimedOut(err) {
+				getPolicyResponse, err = conn.GetPolicyWithContext(ctx, input)
+			}
+
+			if !d.IsNewResource() && tfawserr.ErrCodeEquals(err, iam.ErrCodeNoSuchEntityException) {
+				log.Printf("[WARN] IAM Policy (%s) not found, removing from state", d.Id())
+				//d.SetId("")
+				return diags
+			}
+
+			if err != nil {
+				return sdkdiag.AppendErrorf(diags, "reading IAM policy %s: %s", d.Id(), err)
+			}
+
+			if !d.IsNewResource() && (getPolicyResponse == nil || getPolicyResponse.Policy == nil) {
+				log.Printf("[WARN] IAM Policy (%s) not found, removing from state", d.Id())
+				//d.SetId("")
+				return diags
+			}
+
+			policy := getPolicyResponse.Policy
+			log.Println("\n\nPolicy details: ")
+			log.Printf("arn %s", policy.Arn)
+			log.Printf("description %s", policy.Description)
+			log.Printf("name %s", policy.PolicyName)
+			log.Printf("path %s", policy.Path)
+			log.Printf("policy_id %s", policy.PolicyId)
 		}
 
-		return nil
-	})
-
-	if tfresource.TimedOut(err) {
-		getPolicyResponse, err = conn.GetPolicyWithContext(ctx, input)
 	}
 
-	if !d.IsNewResource() && tfawserr.ErrCodeEquals(err, iam.ErrCodeNoSuchEntityException) {
-		log.Printf("[WARN] IAM Policy (%s) not found, removing from state", d.Id())
-		d.SetId("")
-		return diags
-	}
-
-	if err != nil {
-		return sdkdiag.AppendErrorf(diags, "reading IAM policy %s: %s", d.Id(), err)
-	}
-
-	if !d.IsNewResource() && (getPolicyResponse == nil || getPolicyResponse.Policy == nil) {
-		log.Printf("[WARN] IAM Policy (%s) not found, removing from state", d.Id())
-		d.SetId("")
-		return diags
-	}
-
-	policy := getPolicyResponse.Policy
-
-	d.Set("arn", policy.Arn)
-	d.Set("description", policy.Description)
-	d.Set("name", policy.PolicyName)
-	d.Set("path", policy.Path)
-	d.Set("policy_id", policy.PolicyId)
-
-	tags := KeyValueTags(policy.Tags).IgnoreAWS().IgnoreConfig(ignoreTagsConfig)
-
-	//lintignore:AWSR002
-	if err := d.Set("tags", tags.RemoveDefaultConfig(defaultTagsConfig).Map()); err != nil {
-		return sdkdiag.AppendErrorf(diags, "setting tags: %s", err)
-	}
-
-	if err := d.Set("tags_all", tags.Map()); err != nil {
-		return sdkdiag.AppendErrorf(diags, "setting tags_all: %s", err)
-	}
-
-	// Retrieve policy
-
-	getPolicyVersionRequest := &iam.GetPolicyVersionInput{
-		PolicyArn: aws.String(d.Id()),
-		VersionId: policy.DefaultVersionId,
-	}
-
-	// Handle IAM eventual consistency
-	var getPolicyVersionResponse *iam.GetPolicyVersionOutput
-	err = resource.RetryContext(ctx, propagationTimeout, func() *resource.RetryError {
-		var err error
-		getPolicyVersionResponse, err = conn.GetPolicyVersionWithContext(ctx, getPolicyVersionRequest)
-
-		if tfawserr.ErrCodeEquals(err, iam.ErrCodeNoSuchEntityException) {
-			return resource.RetryableError(err)
-		}
-
-		if err != nil {
-			return resource.NonRetryableError(err)
-		}
-
-		return nil
-	})
-
-	if tfresource.TimedOut(err) {
-		getPolicyVersionResponse, err = conn.GetPolicyVersionWithContext(ctx, getPolicyVersionRequest)
-	}
-
-	if !d.IsNewResource() && tfawserr.ErrCodeEquals(err, iam.ErrCodeNoSuchEntityException) {
-		log.Printf("[WARN] IAM Policy (%s) version (%s) not found, removing from state", d.Id(), aws.StringValue(policy.DefaultVersionId))
-		d.SetId("")
-		return diags
-	}
-
-	if err != nil {
-		return sdkdiag.AppendErrorf(diags, "reading IAM policy version %s: %s", d.Id(), err)
-	}
-
-	var policyDocument string
-	if getPolicyVersionResponse != nil && getPolicyVersionResponse.PolicyVersion != nil {
-		var err error
-		policyDocument, err = url.QueryUnescape(aws.StringValue(getPolicyVersionResponse.PolicyVersion.Document))
-		if err != nil {
-			return sdkdiag.AppendErrorf(diags, "parsing IAM policy (%s) document: %s", d.Id(), err)
-		}
-	}
-
-	policyToSet, err := verify.PolicyToSet(d.Get("policy").(string), policyDocument)
-	if err != nil {
-		return sdkdiag.AppendErrorf(diags, "while setting policy (%s), encountered: %s", policyToSet, err)
-	}
-
-	d.Set("policy", policyToSet)
+	//d.Set("arn", policy.Arn)
+	//d.Set("description", policy.Description)
+	//d.Set("name", policy.PolicyName)
+	//d.Set("path", policy.Path)
+	//d.Set("policy_id", policy.PolicyId)
+	//
+	//tags := KeyValueTags(policy.Tags).IgnoreAWS().IgnoreConfig(ignoreTagsConfig)
+	//
+	////lintignore:AWSR002
+	//if err := d.Set("tags", tags.RemoveDefaultConfig(defaultTagsConfig).Map()); err != nil {
+	//	return sdkdiag.AppendErrorf(diags, "setting tags: %s", err)
+	//}
+	//
+	//if err := d.Set("tags_all", tags.Map()); err != nil {
+	//	return sdkdiag.AppendErrorf(diags, "setting tags_all: %s", err)
+	//}
+	//
+	//// Retrieve policy
+	//
+	//getPolicyVersionRequest := &iam.GetPolicyVersionInput{
+	//	PolicyArn: aws.String(d.Id()),
+	//	VersionId: policy.DefaultVersionId,
+	//}
+	//
+	//// Handle IAM eventual consistency
+	//var getPolicyVersionResponse *iam.GetPolicyVersionOutput
+	//err = resource.RetryContext(ctx, propagationTimeout, func() *resource.RetryError {
+	//	var err error
+	//	getPolicyVersionResponse, err = conn.GetPolicyVersionWithContext(ctx, getPolicyVersionRequest)
+	//
+	//	if tfawserr.ErrCodeEquals(err, iam.ErrCodeNoSuchEntityException) {
+	//		return resource.RetryableError(err)
+	//	}
+	//
+	//	if err != nil {
+	//		return resource.NonRetryableError(err)
+	//	}
+	//
+	//	return nil
+	//})
+	//
+	//if tfresource.TimedOut(err) {
+	//	getPolicyVersionResponse, err = conn.GetPolicyVersionWithContext(ctx, getPolicyVersionRequest)
+	//}
+	//
+	//if !d.IsNewResource() && tfawserr.ErrCodeEquals(err, iam.ErrCodeNoSuchEntityException) {
+	//	log.Printf("[WARN] IAM Policy (%s) version (%s) not found, removing from state", d.Id(), aws.StringValue(policy.DefaultVersionId))
+	//	d.SetId("")
+	//	return diags
+	//}
+	//
+	//if err != nil {
+	//	return sdkdiag.AppendErrorf(diags, "reading IAM policy version %s: %s", d.Id(), err)
+	//}
+	//
+	//var policyDocument string
+	//if getPolicyVersionResponse != nil && getPolicyVersionResponse.PolicyVersion != nil {
+	//	var err error
+	//	policyDocument, err = url.QueryUnescape(aws.StringValue(getPolicyVersionResponse.PolicyVersion.Document))
+	//	if err != nil {
+	//		return sdkdiag.AppendErrorf(diags, "parsing IAM policy (%s) document: %s", d.Id(), err)
+	//	}
+	//}
+	//
+	//policyToSet, err := verify.PolicyToSet(d.Get("policy").(string), policyDocument)
+	//if err != nil {
+	//	return sdkdiag.AppendErrorf(diags, "while setting policy (%s), encountered: %s", policyToSet, err)
+	//}
+	//
+	//d.Set("policy", policyToSet)
 
 	return diags
 }
@@ -418,24 +476,69 @@ func resourceMultiAccountReadOnlyUpdate(ctx context.Context, d *schema.ResourceD
 
 func resourceMultiAccountReadOnlyDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	var diags diag.Diagnostics
-	conn := meta.(*conns.AWSClient).IAMConn()
-
-	if err := policyDeleteNonDefaultVersions(ctx, d.Id(), conn); err != nil {
-		return sdkdiag.AppendErrorf(diags, "deleting IAM policy (%s): deleting non-default versions: %s", d.Id(), err)
+	var accountIds []interface{}
+	if v, ok := d.GetOk("account_ids"); ok {
+		accountIds = v.([]interface{})
 	}
+	policyArns := strings.Split(d.Id(), ",")
 
-	request := &iam.DeletePolicyInput{
-		PolicyArn: aws.String(d.Id()),
-	}
+	for i, accountIdInterface := range accountIds {
+		accountId := accountIdInterface.(string)
+		accountAssumeRoleArn := fmt.Sprintf("arn:aws:iam::%s:role/OrganizationAccountAccessRole", accountId)
+		config := conns.Config{
+			AccessKey:                      d.Get("access_key").(string),
+			CustomCABundle:                 d.Get("custom_ca_bundle").(string),
+			EC2MetadataServiceEndpoint:     d.Get("ec2_metadata_service_endpoint").(string),
+			EC2MetadataServiceEndpointMode: d.Get("ec2_metadata_service_endpoint_mode").(string),
+			Endpoints:                      make(map[string]string),
+			HTTPProxy:                      d.Get("http_proxy").(string),
+			Insecure:                       d.Get("insecure").(bool),
+			MaxRetries:                     25, // Set default here, not in schema (muxing with v6 provider).
+			Profile:                        d.Get("profile").(string),
+			Region:                         d.Get("region").(string),
+			S3UsePathStyle:                 d.Get("s3_use_path_style").(bool) || d.Get("s3_force_path_style").(bool),
+			SecretKey:                      d.Get("secret_key").(string),
+			SkipCredsValidation:            d.Get("skip_credentials_validation").(bool),
+			SkipGetEC2Platforms:            d.Get("skip_get_ec2_platforms").(bool),
+			SkipRegionValidation:           d.Get("skip_region_validation").(bool),
+			SkipRequestingAccountId:        d.Get("skip_requesting_account_id").(bool),
+			STSRegion:                      d.Get("sts_region").(string),
+			TerraformVersion:               "",
+			Token:                          d.Get("token").(string),
+			UseDualStackEndpoint:           d.Get("use_dualstack_endpoint").(bool),
+			UseFIPSEndpoint:                d.Get("use_fips_endpoint").(bool),
+		}
+		config.AssumeRole = &awsbase.AssumeRole{RoleARN: accountAssumeRoleArn}
 
-	_, err := conn.DeletePolicyWithContext(ctx, request)
+		var metaClient *conns.AWSClient
+		if v, ok := meta.(*conns.AWSClient); ok {
+			metaClient = v
+		} else {
+			metaClient = new(conns.AWSClient)
+		}
+		metaClient, diagns := config.ConfigureProvider(ctx, metaClient)
+		if diagns.HasError() {
+			sdkdiag.AppendErrorf(diags, "Unable to configure provider in account %s: %s", accountId, diagns)
+		}
 
-	if tfawserr.ErrCodeEquals(err, iam.ErrCodeNoSuchEntityException) {
-		return diags
-	}
+		conn := meta.(*conns.AWSClient).IAMConn()
 
-	if err != nil {
-		return sdkdiag.AppendErrorf(diags, "deleting IAM policy (%s): %s", d.Id(), err)
+		if i < len(policyArns) {
+			request := &iam.DeletePolicyInput{
+				PolicyArn: &policyArns[i],
+			}
+
+			_, err := conn.DeletePolicyWithContext(ctx, request)
+
+			if tfawserr.ErrCodeEquals(err, iam.ErrCodeNoSuchEntityException) {
+				sdkdiag.AppendErrorf(diags, "IAM policy not found (%s): %s", policyArns[i], err)
+			}
+
+			if err != nil {
+				sdkdiag.AppendErrorf(diags, "deleting IAM policy (%s): %s", d.Id(), err)
+			}
+		}
+
 	}
 
 	return diags

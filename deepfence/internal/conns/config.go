@@ -125,26 +125,6 @@ func (c *Config) ConfigureProvider(ctx context.Context, client *AWSClient) (*AWS
 		log.Println("[WARN] AWS account ID not found for provider. See https://www.terraform.io/docs/providers/aws/index.html#skip_requesting_account_id for implications.")
 	}
 
-	if len(c.ForbiddenAccountIds) > 0 {
-		for _, forbiddenAccountID := range c.AllowedAccountIds {
-			if accountID == forbiddenAccountID {
-				return nil, diag.Errorf("AWS account ID not allowed: %s", accountID)
-			}
-		}
-	}
-	if len(c.AllowedAccountIds) > 0 {
-		found := false
-		for _, allowedAccountID := range c.AllowedAccountIds {
-			if accountID == allowedAccountID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, diag.Errorf("AWS account ID not allowed: %s", accountID)
-		}
-	}
-
 	DNSSuffix := "amazonaws.com"
 	if p, ok := endpoints.PartitionForRegion(endpoints.DefaultPartitions(), c.Region); ok {
 		DNSSuffix = p.DNSSuffix()
@@ -162,9 +142,9 @@ func (c *Config) ConfigureProvider(ctx context.Context, client *AWSClient) (*AWS
 	client.TerraformVersion = c.TerraformVersion
 
 	// API clients (generated).
-	c.sdkv1Conns(client, sess)
-	c.sdkv2Conns(client, cfg)
-	c.sdkv2LazyConns(client, cfg)
+	//c.sdkv1Conns(client, sess)
+	//c.sdkv2Conns(client, cfg)
+	//c.sdkv2LazyConns(client, cfg)
 
 	// AWS SDK for Go v1 custom API clients.
 
